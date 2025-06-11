@@ -10,13 +10,11 @@
 from pyomo.environ import *
 from egret.data.data_utils import _read_from_file
 
-file_path = "examples/unit_commitment/tiny_uc_tc_solution.json"
+file_path = "/egret/examples/unit_commitment/tiny_uc_tc_solution.json"
 
 model_data_dict = _read_from_file(file_path, file_type="json")
 system = model_data_dict['system']
 elements = model_data_dict['elements']
-
-from egret.data.data_utils import _read_from_file
 
 # Replace with your actual JSON filename
 model_data_dict = _read_from_file(file_path, file_type="json")
