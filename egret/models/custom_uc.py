@@ -1,5 +1,6 @@
 from pyomo.environ import *
 from egret.data.data_utils import _read_from_file
+import math
 
 # enter subhorizon 
 subh_n = 2
@@ -12,41 +13,42 @@ system      = model_data_dict.get("system", {})
 elements    = model_data_dict.get("elements", {})
 num_periods = len(system['time_keys'])
 
+# Get Parameters from .json file
 p_maxx = {}
 p_t0   = {}
-
 for key in elements['generator'].keys():
     p_maxx[key] = elements['generator'][key]['p_max']
     p_t0[key]   = elements['generator'][key]['initial_p_output']
-
 
 def build_model(s_e):
 
     m = ConcreteModel()
 
-    # Define Model Sets
+    # Sets
     m.TimePeriods        = s_e
     m.ThermalGenerators  = Set(initialize=elements['generator'].keys())
     m.TransmissionLines  = Set(initialize=elements['branch'].keys())
-    m.Buses              = Set(initialize=elements['bus'].keys())
 
-    # Define Model Parameters
+    # Parameters 
+    ## 1 - In subhorizon
     m.PowerGeneratedT0   = Param(m.ThermalGenerators, initialize=p_t0)
     m.MaximumPowerOutput = Param(m.ThermalGenerators, initialize=p_maxx)
 
-    #### Define Variables & Bounds
-    #1 - Power
+    ## 2 - For variables outside the subhorizon
+    m.UnitOn_logical = Param(m.ThermalGenerators, initialize={g: 1 for g in m.ThermalGenerators}, mutable=True)  # This is a placeholder for unit on/off status of variables that couple subhorizons
+
+    # Variables & Bounds
+    ## 1 - Power
     def power_bounds_rule(m, g, t):
         return (0, m.MaximumPowerOutput[g])
     m.PowerGenerated        = Var(m.ThermalGenerators, m.TimePeriods, within=NonNegativeReals, bounds=power_bounds_rule) 
-    #m.MaximumPowerAvailable = Var(m.ThermalGenerators, m.TimePeriods, within=NonNegativeReals)
-
-    #2 - Binaries
+    
+    ## 2 - Status
     m.UnitOn    = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
     m.UnitStart = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
     m.UnitStop  = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
 
-    #### Model Constraints
+    # Constraints
     m.coupling_constraints = ConstraintList()
     m.logical_constraints  = ConstraintList()
 
@@ -59,21 +61,26 @@ def build_model(s_e):
             if t in m.TimePeriods and t-1 in m.TimePeriods: 
                 m.logical_constraints.add(m.UnitStart[g,t] - m.UnitStop[g,t] == m.UnitOn[g,t] - m.UnitOn[g,t-1])
             else:
-                m.coupling_constraints.add(m.UnitStart[g,t] - m.UnitStop[g,t] == m.UnitOn[g,t] - m.UnitOn[g,t])    
+                m.coupling_constraints.add(m.UnitStart[g,t] - m.UnitStop[g,t] == m.UnitOn[g,t] - m.UnitOn_logical[g])    
 
     m.pprint()
 
     return m
 
+#each element of the subproblems list is a subpproblem. The loop will bukld the subproblems and attach them to the list. 
 subproblems = []
+
 for t in range(1,num_periods,subh_n):
-    t_j = [i for i in range(t,t+subh_n)]
+    t_j   = [i for i in range(t,t+subh_n)]
     model = build_model(t_j)
     subproblems.append(model)
 
 
 
+
+#m.MaximumPowerAvailable = Var(m.ThermalGenerators, m.TimePeriods, within=NonNegativeReals)
 #m.ThermalLimit       = Param(m.TransmissionLines, initialize=thermal_limit_dict)
+#m.Buses              = Set(initialize=elements['bus'].keys())
 
 # # 3 - LineFlow
 # def line_bounds_rule(m, l, t):
