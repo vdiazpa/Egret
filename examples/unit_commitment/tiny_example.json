@@ -1,0 +1,26 @@
+{
+  "system": {
+    "time_keys": [1, 2, 3, 4] 
+  },
+  "elements": {
+    "generator": {
+      "GEN1_0_t": {
+        "initial_p_output": 300.0,
+        "p_max": 455.0
+      },
+      "GEN1_1_t": {
+        "initial_p_output": 400.0,
+        "p_max": 555.0
+      }
+    },
+    "branch": {
+      "Branch1": {
+        "rating_long_term": 300.0
+      }
+    },
+    "bus": {
+      "Bus1": {},
+      "Bus2": {}
+    }
+  }
+}
