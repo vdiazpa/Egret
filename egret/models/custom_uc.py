@@ -1,12 +1,13 @@
 from pyomo.environ import *
 from egret.data.data_utils import _read_from_file
+from scipy.sparse import csr_matrix
 import math
+import numpy as np
 
-# enter subhorizon 
+# enter subhorizon size
 subh_n = 2
-#file_path = "examples/unit_commitment/tiny_uc_tc_solution.json"
-file_path = "examples/unit_commitment/tiny_example.json"
 
+file_path = "examples/unit_commitment/tiny_example.json"
 model_data_dict = _read_from_file(file_path, file_type="json")
 
 system      = model_data_dict.get("system", {})
@@ -14,13 +15,25 @@ elements    = model_data_dict.get("elements", {})
 num_periods = len(system['time_keys'])
 
 # Get Parameters from .json file
-p_maxx = {}
-p_t0   = {}
-for key in elements['generator'].keys():
-    p_maxx[key] = elements['generator'][key]['p_max']
-    p_t0[key]   = elements['generator'][key]['initial_p_output']
+p_maxx      = {}
+p_t0        = {}
+commit_cost = {}
 
-def build_model(s_e):
+for key in elements['generator'].keys():
+    p_maxx[key]      = elements['generator'][key]['p_max']
+    p_t0[key]        = elements['generator'][key]['initial_p_output']
+    commit_cost[key] = elements['generator'][key]['commitment_cost']
+
+num_sh   = math.ceil(num_periods/subh_n)       # number of subproblems
+num_gens = len(elements['generator'].keys())   # number of thermal generators
+num_vars = num_gens * subh_n * 4               # number of variables in subhorizon(power generated, unit on, unit start/stop)
+num_p    = num_gens * subh_n                   # number of generators * num times in subhorizon 
+
+Aj_s = []
+
+l = [1,2]
+
+def build_model(s_e, L):
 
     m = ConcreteModel()
 
@@ -30,53 +43,79 @@ def build_model(s_e):
     m.TransmissionLines  = Set(initialize=elements['branch'].keys())
 
     # Parameters 
-    ## 1 - In subhorizon
     m.PowerGeneratedT0   = Param(m.ThermalGenerators, initialize=p_t0)
     m.MaximumPowerOutput = Param(m.ThermalGenerators, initialize=p_maxx)
-
-    ## 2 - For variables outside the subhorizon
-    m.UnitOn_logical = Param(m.ThermalGenerators, initialize={g: 1 for g in m.ThermalGenerators}, mutable=True)  # This is a placeholder for unit on/off status of variables that couple subhorizons
+    m.CommitmentCost     = Param(m.ThermalGenerators, initialize=commit_cost)
+    m.UnitOn_logical     = Param(m.ThermalGenerators, initialize={g: 1 for g in m.ThermalGenerators}, mutable=True)  ## 2 - For variables outside the subhorizon
 
     # Variables & Bounds
-    ## 1 - Power
     def power_bounds_rule(m, g, t):
         return (0, m.MaximumPowerOutput[g])
-    m.PowerGenerated        = Var(m.ThermalGenerators, m.TimePeriods, within=NonNegativeReals, bounds=power_bounds_rule) 
     
-    ## 2 - Status
-    m.UnitOn    = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
-    m.UnitStart = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
-    m.UnitStop  = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
+    m.PowerGenerated     = Var(m.ThermalGenerators, m.TimePeriods, within=NonNegativeReals, bounds=power_bounds_rule) 
+    m.UnitOn             = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
+    m.UnitStart          = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
+    m.UnitStop           = Var(m.ThermalGenerators, m.TimePeriods, within=Binary)
+
+    A_j = []
 
     # Constraints
-    m.coupling_constraints = ConstraintList()
-    m.logical_constraints  = ConstraintList()
+    m.coupling_constraints = ConstraintList(doc = 'coupling')
+    m.logical_constraints  = ConstraintList(doc = 'logical')
 
     def enforce_max_capacity_rule(m, g, t):
         return m.PowerGenerated[g,t] <= m.MaximumPowerOutput[g]*m.UnitOn[g,t]
-    m.EnforceMaxCapacity = Constraint(m.ThermalGenerators, m.TimePeriods, rule=enforce_max_capacity_rule)
+    m.EnforceMaxCapacity = Constraint(m.ThermalGenerators, m.TimePeriods, rule=enforce_max_capacity_rule, doc= 'max_capacity')
 
+    i = 0
     for g in m.ThermalGenerators:
         for t in m.TimePeriods: 
             if t in m.TimePeriods and t-1 in m.TimePeriods: 
                 m.logical_constraints.add(m.UnitStart[g,t] - m.UnitStop[g,t] == m.UnitOn[g,t] - m.UnitOn[g,t-1])
             else:
-                m.coupling_constraints.add(m.UnitStart[g,t] - m.UnitStop[g,t] == m.UnitOn[g,t] - m.UnitOn_logical[g])    
+                lst     = [1 if k == i else 0 for k in range(num_p)]
+                neg_lst = [-k for k in lst]
+                A_j.append( [0]*subh_n*num_gens + neg_lst + lst + neg_lst )
+        i+=subh_n 
 
-    m.pprint()
+    lam = np.array(L)                # vector of lambdas
+    A_j_sparse = csr_matrix(A_j)     #turn A_j into array for multiplication
+    result = lam @ A_j_sparse
+    result = np.array(result).flatten()  # flatten the result to a 1D array
 
-    return m
+    print(A_j, '\n')
+    print(result)
+
+    vec_prod = {}
+    i = 0
+
+    for a in m.ThermalGenerators:
+        for t in m.TimePeriods:
+            vec_prod[a,t] = float(result[i])
+            i += 1
+
+    print(vec_prod)
+
+    def ofv(m):
+        return  sum(m.CommitmentCost[g] * m.UnitOn[g, t] for g in m.ThermalGenerators for t in m.TimePeriods)
+         
+    m.Objective = Objective(rule=ofv, sense=minimize)
+
+    #m.write('m.lp', io_options = {'symbolic_solver_labels': True})
+
+    Aj_s.append(A_j)
+
+   # m.pprint()
 
 #each element of the subproblems list is a subpproblem. The loop will bukld the subproblems and attach them to the list. 
-subproblems = []
+if __name__ == "__main__":
+    subproblems = []
+    for t in range(1, num_periods, subh_n):
+        t_j   = [i for i in range(t, t + subh_n)]
+        model = build_model(t_j, l)
+        subproblems.append(model)
 
-for t in range(1,num_periods,subh_n):
-    t_j   = [i for i in range(t,t+subh_n)]
-    model = build_model(t_j)
-    subproblems.append(model)
-
-
-
+print(Aj_s)
 
 #m.MaximumPowerAvailable = Var(m.ThermalGenerators, m.TimePeriods, within=NonNegativeReals)
 #m.ThermalLimit       = Param(m.TransmissionLines, initialize=thermal_limit_dict)
@@ -130,4 +169,4 @@ for t in range(1,num_periods,subh_n):
 #                  m.ScaledShutdownRampLimit[g,t-1]  * (m.UnitOn[g, t-1] - m.UnitOn[g, t]) + \
 #                  m.MaximumPowerOutput[g,t] * (1 - m.UnitOn[g, t-1])
     
-#     model.EnforceScaledNominalRampDownLimits = Constraint(model.ThermalGenerators, model.TimePeriods, rule=enforce_ramp_down_limits_rule)
+#     model.EnforceScaledNominalRampDownLimits = Constraint(model.ThermalGenerators, model.TimePeriods, rule=enforce_ramp_down_limits_rule)ejckcblubhedrtlhgbnildlgrutunuifrcdfkkkiguck

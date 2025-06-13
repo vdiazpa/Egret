@@ -4,13 +4,15 @@
   },
   "elements": {
     "generator": {
-      "GEN1_0_t": {
-        "initial_p_output": 300.0,
-        "p_max": 455.0
+      "GEN_A": {
+        "initial_p_output": 0.0,
+        "p_max": 455.0,
+        "commitment_cost": 100.0
       },
-      "GEN1_1_t": {
-        "initial_p_output": 400.0,
-        "p_max": 555.0
+      "GEN_B": {
+        "initial_p_output": 0.0,
+        "p_max": 555.0, 
+        "commitment_cost": 150.0
       }
     },
     "branch": {
